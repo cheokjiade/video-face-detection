@@ -12,13 +12,21 @@ A single static page (`index.html`). It opens the device camera (with a picker i
    - A 68-point landmark model lines each face up.
    - A ResNet model turns each face into a 128-number descriptor.
 3. It compares each descriptor with the faces already found, using Euclidean distance. A distance below the threshold (0.55 by default) means the same person, and the time is added to that person's list. Otherwise it saves a cropped snapshot as a new unique face.
-4. Each log line shows how long the scan took (`[NN ms]`), so you can check whether a device keeps up.
+4. A **Performance** panel updates after every scan. It shows:
+   - **OK/SLOW**: whether scans take more than 60% of the scan interval, judged on the average of the last 20 scans (so it catches slowdown from heat).
+   - **Worst scan** and total scan count.
+   - **Last scan split into steps**: copying the frame, running the models, and matching faces.
+   - **Number of faces** in the last frame.
+   - **System info**: GPU backend, camera resolution, TensorFlow.js memory (if this keeps growing, memory is leaking), model load time and GPU warm-up time.
+5. Right after loading, the page runs each model once on a blank image. The GPU compiles its programs on a model's first run, which took about 15 s in testing, so this keeps the first camera scan from freezing.
 
 To run it locally, run `npx serve` and open the localhost URL. The camera needs HTTPS or localhost, so opening the file directly may not work. The models load from the jsDelivr CDN.
 
 ## Hardware requirements
 
-> **These numbers are estimates.** They come from the published model sizes and typical TensorFlow.js WebGL performance. They have **not** been measured on real devices. To measure, open the page on the target device and read the `[NN ms]` value in the log.
+> **These numbers are estimates.** They come from the published model sizes and typical TensorFlow.js WebGL performance. They have **not** been measured on real devices. To measure, open the page on the target device and read the Performance panel.
+
+**One measured data point:** desktop Edge (WebGL) on a 1280×1006 image of 3 faces averaged 55–100 ms per scan (models about 55 ms, frame copy about 5 ms, matching under 1 ms). TensorFlow.js memory stayed flat at 44 MB over 35+ scans. GPU warm-up took 1.3 s with the browser's shader cache already filled; the first-ever run took about 15 s.
 
 **What "smooth" means here:** each scan has to finish faster than the scan interval. With the default 0.5 s interval, a scan time under about 300 ms leaves room for the camera preview to stay smooth.
 

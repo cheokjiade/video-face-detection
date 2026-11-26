@@ -11,6 +11,8 @@
   #faces { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
   .face { background: #222; padding: .5rem; border-radius: 6px; width: 140px; font-size: .8rem; }
   .face img { width: 140px; height: 140px; object-fit: cover; border-radius: 4px; }
+  #perf { background: #000; padding: .5rem; font-size: .8rem; color: #6f6; white-space: pre-wrap; }
+  #perf.slow { color: #f88; }
   #log { background: #000; height: 12rem; overflow: auto; font: .8rem monospace; padding: .5rem; white-space: pre; }
 </style>
 </head>
@@ -22,6 +24,8 @@
 <label>Scan every <input id="interval" type="number" value="0.5" step="0.1" min="0.1" style="width:4rem">s</label>
 <label>Match threshold <input id="threshold" type="number" value="0.55" step="0.05" min="0.1" max="1" style="width:4rem"></label>
 <video id="video" muted playsinline></video>
+<h2>Performance</h2>
+<pre id="perf" aria-live="off">Waiting for first scan…</pre>
 <h2>Unique faces (<span id="count">0</span>)</h2>
 <div id="faces"></div>
 <h2>Log</h2>
@@ -32,6 +36,7 @@
 const MODELS = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/';
 const $ = id => document.getElementById(id);
 const video = $('video'), frame = document.createElement('canvas');
+frame.getContext('2d', { willReadFrequently: true }); // face-api reads pixels back every scan; browser warned without this
 const known = []; // { id, descriptor, times: [], el }
 
 const log = msg => { $('log').textContent += msg + '\n'; $('log').scrollTop = 1e9; console.log(msg); };
@@ -71,21 +76,40 @@ function render(face) {
   face.el.title = t.join(', ');
 }
 
+const perf = { n: 0, recent: [], max: 0 };
+function showPerf(copy, model, match, faces) {
+  const total = copy + model + match, budget = +$('interval').value * 1000;
+  perf.n++; perf.max = Math.max(perf.max, total);
+  perf.recent = [...perf.recent.slice(-19), total]; // rolling window shows thermal slowdown that a lifetime average hides
+  const avg = perf.recent.reduce((a, b) => a + b) / perf.recent.length;
+  const slow = avg > budget * 0.6; // scans eating most of the interval = preview stutters, interval drifts
+  const mem = faceapi.tf.memory(), r = n => n.toFixed(0);
+  $('perf').textContent = [
+    `${slow ? 'SLOW' : 'OK'} · avg ${r(avg)} ms over last ${perf.recent.length} scans · max ${r(perf.max)} ms · budget ${budget} ms · ${perf.n} scans`,
+    `Last scan ${r(total)} ms = frame copy ${r(copy)} + models ${r(model)} + matching ${r(match)} · ${faces} face(s)`,
+    `Backend ${faceapi.tf.getBackend()} · camera ${video.videoWidth}×${video.videoHeight} · TF.js memory ${(mem.numBytes / 1048576).toFixed(1)} MB / ${mem.numTensors} tensors · ${perf.loadMs}`,
+  ].join('\n');
+  $('perf').className = slow ? 'slow' : '';
+}
+
 async function scan() {
-  const t = new Date().toLocaleTimeString(), start = performance.now();
+  const t = new Date().toLocaleTimeString(), t0 = performance.now();
   frame.width = video.videoWidth; frame.height = video.videoHeight;
   frame.getContext('2d').drawImage(video, 0, 0); // freeze the frame so the crop matches the detection
+  const t1 = performance.now();
   const results = await faceapi
     .detectAllFaces(frame, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
     .withFaceLandmarks().withFaceDescriptors();
+  const t2 = performance.now();
   for (const r of results) {
     let face = findMatch(r.descriptor, known, +$('threshold').value);
     if (face) face.times.push(t);
     else { face = addFace(r.descriptor, r.detection.box, t); log(`${t}  NEW face #${face.id}`); }
     render(face);
   }
-  const ms = Math.round(performance.now() - start); // use this to judge if the device keeps up with the scan interval
-  if (results.length) log(`${t}${results.length} face(s): ${results.map(r => '#' + findMatch(r.descriptor, known, +$('threshold').value).id).join(' ')}  [${ms} ms]`);
+  const t3 = performance.now(), ms = Math.round(t3 - t0);
+  showPerf(t1 - t0, t2 - t1, t3 - t2, results.length);
+  if (results.length) log(`${t}  ${results.length} face(s): ${results.map(r => '#' + findMatch(r.descriptor, known, +$('threshold').value).id).join(' ')}  [${ms} ms]`);
 }
 
 let busy = false, lastScan = -Infinity;
@@ -120,11 +144,22 @@ $('camera').onclick = () => startCamera();
 $('cameras').onchange = e => startCamera(e.target.value);
 
 (async () => {
+  const loadStart = performance.now();
   await Promise.all([
     faceapi.nets.ssdMobilenetv1.loadFromUri(MODELS),
     faceapi.nets.faceLandmark68Net.loadFromUri(MODELS),
     faceapi.nets.faceRecognitionNet.loadFromUri(MODELS),
   ]);
+  const warmStart = performance.now();
+  $('status').textContent = 'Warming up GPU…';
+  // the first run of each model compiles its GPU shaders (measured ~15 s on one laptop); do it now, not on the first camera scan
+  const blank = Object.assign(document.createElement('canvas'), { width: 150, height: 150 });
+  await faceapi.detectAllFaces(blank);
+  await faceapi.nets.faceLandmark68Net.detectLandmarks(blank);
+  await faceapi.nets.faceRecognitionNet.computeFaceDescriptor(blank);
+  const s = ms => (ms / 1000).toFixed(1) + ' s';
+  perf.loadMs = `models loaded in ${s(warmStart - loadStart)} · GPU warm-up ${s(performance.now() - warmStart)}`;
+  log(perf.loadMs);
   // self-check of the dedupe logic
   const a = new Float32Array(128), b = new Float32Array(128).fill(0.1);
   console.assert(findMatch(a, [{ id: 1, descriptor: a }], 0.55)?.id === 1, 'identical should match');
