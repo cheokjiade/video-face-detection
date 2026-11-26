@@ -46,8 +46,13 @@ To run it locally, run `npx serve` and open the localhost URL. The camera needs 
   - **WebGPU**: averaged 135 ms per scan, worst 169 ms. GPU warm-up took 2.1 s.
   - **WebGL**: averaged 231 ms per scan, worst 513 ms. GPU warm-up took 2.9 s.
   - TensorFlow.js memory: 16.7 MB.
-- **On this PC, Human is slower per scan than face-api was** (about 135 ms vs 55–100 ms). Its alignment tracks 468 points instead of 68, and its descriptor model works on larger images, so each face costs more.
-- **The iPhone 15 Pro and MacBook Air M4 still need re-measuring** with Human.
+- **iPhone 15 Pro** (Chrome on iOS; WebGPU; 720×1280 camera):
+  - Averaged 45 ms per scan, worst 88 ms, over 169 scans. The device could scan about 22 times per second.
+  - The last scan had 0 faces (models 39 ms), and the 20-scan average includes scans with no faces. Scans with a face in frame are probably nearer the 88 ms worst case.
+  - Memory: 16.7 MB, flat. GPU warm-up: 1.8 s.
+  - 2 people were captured as 2 unique faces, with no duplicates.
+- **Human is about twice as fast as face-api on the iPhone** (WebGPU vs WebGL), even though it is slower on the desktop test PC (about 135 ms vs 55–100 ms). Human's alignment does more work per face (468 points instead of 68), but WebGPU more than makes up for that on the iPhone.
+- **The MacBook Air M4 still needs re-measuring** with Human.
 
 **Measured with face-api (the previous version, for comparison):**
 
