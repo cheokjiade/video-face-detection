@@ -29,6 +29,7 @@ To run it locally, run `npx serve` and open the localhost URL. The camera needs 
 **Measured data points:**
 
 - **iPhone 15 Pro** (Chrome on iOS, so the WebKit engine, WebGL; 720×1280 camera, 1 face): averaged 109 ms per scan, worst 135 ms, over 72 scans (models about 114 ms, frame copy about 6 ms). Memory stayed flat at 44 MB. GPU warm-up took 0.8 s.
+- **MacBook Air M4** (WebGL; 1280×720 camera, 1 face): averaged 81 ms per scan, worst 98 ms, over 38 scans (models about 58 ms, frame copy about 12 ms). Memory stayed flat at 44 MB. GPU warm-up took 2.3 s.
 - **Desktop Edge** (WebGL), on a 1280×1006 image of 3 faces averaged 55–100 ms per scan (models about 55 ms, frame copy about 5 ms, matching under 1 ms). TensorFlow.js memory stayed flat at 44 MB over 35+ scans. GPU warm-up took 1.3 s with the browser's shader cache already filled; the first-ever run took about 15 s.
 
 **What "smooth" means here:** each scan has to finish faster than the scan interval. With the default 0.5 s interval, a scan time under about 300 ms leaves room for the camera preview to stay smooth.
