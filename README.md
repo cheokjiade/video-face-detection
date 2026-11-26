@@ -50,13 +50,38 @@ These tests use public-domain and CC0 images from Wikimedia Commons, fed to Edge
 | [Metro platform at rush hour](https://commons.wikimedia.org/wiki/File:Evening_rush_on_the_Line_4-Yellow_platform_at_Pinheiros_station,_S%C3%A3o_Paulo.jpg) (CC0) | ~15 clear, many more distant | 4 / 3 | ~280 ms | Small and partly hidden faces are missed |
 | [Pedestrians on a crosswalk](https://commons.wikimedia.org/wiki/File:Pedestrians_crossing_rue_Dalhousie,_Quebec_City_01.jpg) (CC0) | 11 | 9 / 9 | ~430 ms (SLOW) | 2 people seen side-on were missed |
 | [Sora "Tokyo Walk" video](https://commons.wikimedia.org/wiki/File:OpenAI_Sora_in_Action-_Tokyo_Walk.webm) (AI-generated, public domain), interval 0 | 1 main, background crowd | 1 card over 347 scans | ~45–65 ms, ~16 scans/s | One person tracked as one card for 20 s while walking toward the camera |
+| [Fudan University group photo, Shanghai](https://commons.wikimedia.org/wiki/File:Ambassador_Burns_and_students_from_Fudan_University_and_Harvard_pose_for_group_photo_in_Shanghai.jpg) (U.S. State Dept, public domain) | ~45 | 30 / 26 | ~1,240 ms (SLOW) | Back rows partly hidden behind people in front. 4 found faces too uncertain for a card |
+| [Yenching Academy group photo, Beijing](https://commons.wikimedia.org/wiki/File:Group_photo_of_Ambassador_Burns_with_students_from_the_Yenching_Academy_of_Peking_University.jpg) (U.S. State Dept, public domain) | ~50 | 15 / 14 | ~895 ms (SLOW) | Wide shot, so faces are small (about 20–30 px) |
+| [Chinatown street market, Singapore](https://commons.wikimedia.org/wiki/File:Chinatown_street_market_(Unsplash).jpg) (CC0) | ~10 | 1 / 1 | ~210 ms | Most people are side-on, facing away or small |
+| [Scooter rider, Shanghai](https://commons.wikimedia.org/wiki/File:Shanghai,_China_(Unsplash_lohK4mWig70).jpg) (CC0) | 1 | 1 / 1 | ~56 ms | Motion-blurred background did not cause problems |
+| [Street intersection, Hong Kong](https://commons.wikimedia.org/wiki/File:Crowded_Asian_intersection_(Unsplash).jpg) (CC0) | ~30, distant | 0 | ~20 ms | Pedestrians too far away |
 | [Distant crowd on a bridge](https://commons.wikimedia.org/wiki/File:Artemis_II_launch_from_A_Max_Brewer_Bridge_(AFRC2026-0071-03).jpg) (NASA, public domain) | hundreds | 0 | ~20 ms | Faces are a few pixels across. Too small to detect |
 
 **What this shows:**
 - **Faces need about 30–40 px or more** in the camera frame. BlazeFace scales every frame down to 256×256, so small and distant faces are lost. Splitting the frame into 2×2 tiles was tested and added only 1–6 faces at 2–4 times the cost, so it isn't enabled.
 - **Faces must point roughly at the camera.** Faces seen side-on, looking up, or covered by hands or sunglasses are often missed.
 - **Scan time grows with the number of faces**, because every face gets alignment and a descriptor. With 9–14 faces the desktop PC can't keep up with a 0.5 s interval, and the panel shows SLOW. For crowds, use a 1 s interval.
-- **Duplicate removal held** in every test after the two fixes above (several views per person, dropping doubled boxes).
+- **Duplicate removal held in every test** after the two fixes above (several views per person, dropping doubled boxes), including 26 cards for 26 people in the Fudan group photo.
+
+### Performance with multiple people
+
+**Desktop test PC** (Edge, WebGPU, 1280-wide frames). Each row is the average over a run of scans of one image:
+
+| Faces found in frame | Scan time | Scans per second it could do | Test |
+|---|---|---|---|
+| 1 | ~45–65 ms | ~16–20 | Tokyo walk video, Shanghai scooter rider |
+| 3 | ~130–150 ms | ~7 | Apollo 11 crew portrait |
+| 4 | ~280 ms | ~3.5 | Metro platform |
+| 9 | ~430 ms | ~2.3 | Quebec City pedestrians |
+| 14 | ~660 ms | ~1.5 | Apollo 11 VIP spectators |
+| 15 | ~895 ms | ~1.1 | Yenching Academy group |
+| 30 | ~1,240 ms | ~0.8 | Fudan University group |
+
+- **Rule of thumb:** about **20 ms per scan plus 40 ms for each face** on this PC. Every face needs its own alignment (FaceMesh) and descriptor (FaceRes) run. Finding the faces costs about the same whatever the count.
+- **Some scans cost more than their visible faces suggest.** The Singapore market scan took about 210 ms for 1 card. The detector also produced low-scoring candidates that went through alignment before being dropped.
+- **What a 0.5 s interval can handle:** up to about **10 faces** on this PC. Beyond that the panel shows SLOW and scans simply run back to back. Nothing breaks, but the effective rate drops, e.g. to about 0.8 scans/s with 30 faces.
+- **Phones:** on a single face the iPhone 15 Pro scanned in about 45–88 ms, against about 45–65 ms on this PC. So the per-face cost there is likely similar or a little higher. Crowds on a phone haven't been measured yet; a group-photo test on the iPhone would settle it.
+- **For groups:** use a 1 s interval, or raise "Detect min confidence" to skip the uncertain faces. Each skipped face saves about 40 ms.
 
 ### Screenshots
 
@@ -71,6 +96,18 @@ These tests use public-domain and CC0 images from Wikimedia Commons, fed to Edge
 
 **Sora Tokyo walk video:** one person, one card, 347 scans.
 ![Tokyo walk](docs/screenshots/tokyo-walk.jpg)
+
+**Fudan University group, Shanghai:** 30 faces found, 26 cards, no duplicates. The back rows are partly hidden.
+![Fudan group](docs/screenshots/asia-fudan.jpg)
+
+**Yenching Academy group, Beijing:** wide shot, so many faces are too small.
+![Yenching group](docs/screenshots/asia-yenching.jpg)
+
+**Chinatown market, Singapore:** most people are side-on or facing away.
+![Chinatown](docs/screenshots/asia-chinatown.jpg)
+
+**Scooter rider, Shanghai:**
+![Shanghai scooter](docs/screenshots/asia-shanghai.jpg)
 
 **Distant crowd:** faces are too small to detect.
 ![Distant crowd](docs/screenshots/artemis.jpg)

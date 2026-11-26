@@ -1,0 +1,5 @@
+# your own test videos stay local
+*.mp4
+*.mov
+*.webm
+*.m4v
