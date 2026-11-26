@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Video Face Capture POC</title>
+<title>Camera Face Capture POC</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 1rem; background: #111; color: #eee; }
   video { max-width: 100%; max-height: 60vh; background: #000; display: block; margin: .5rem 0; }
@@ -15,12 +15,13 @@
 </style>
 </head>
 <body>
-<h1>Video Face Capture POC</h1>
+<h1>Camera Face Capture POC</h1>
 <p id="status">Loading models…</p>
-<input type="file" id="file" accept="video/*" disabled>
+<button id="camera" disabled>Start camera</button>
+<select id="cameras" hidden aria-label="Camera"></select>
 <label>Scan every <input id="interval" type="number" value="0.5" step="0.1" min="0.1" style="width:4rem">s</label>
 <label>Match threshold <input id="threshold" type="number" value="0.55" step="0.05" min="0.1" max="1" style="width:4rem"></label>
-<video id="video" controls muted playsinline></video>
+<video id="video" muted playsinline></video>
 <h2>Unique faces (<span id="count">0</span>)</h2>
 <div id="faces"></div>
 <h2>Log</h2>
@@ -33,7 +34,6 @@ const $ = id => document.getElementById(id);
 const video = $('video'), frame = document.createElement('canvas');
 const known = []; // { id, descriptor, times: [], el }
 
-const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${(t % 60).toFixed(1).padStart(4, '0')}`;
 const log = msg => { $('log').textContent += msg + '\n'; $('log').scrollTop = 1e9; console.log(msg); };
 
 // ponytail: linear scan over known faces, fine for hundreds; use a vector index if it grows to thousands
@@ -67,12 +67,12 @@ function addFace(descriptor, box, t) {
 
 function render(face) {
   const t = face.times;
-  face.el.querySelector('.t').textContent = `${fmt(t[0])}–${fmt(t[t.length - 1])} · ${t.length} seen`;
-  face.el.title = t.map(fmt).join(', ');
+  face.el.querySelector('.t').textContent = `${t[0]}–${t[t.length - 1]} · ${t.length} seen`;
+  face.el.title = t.join(', ');
 }
 
 async function scan() {
-  const t = video.currentTime, start = performance.now();
+  const t = new Date().toLocaleTimeString(), start = performance.now();
   frame.width = video.videoWidth; frame.height = video.videoHeight;
   frame.getContext('2d').drawImage(video, 0, 0); // freeze the frame so the crop matches the detection
   const results = await faceapi
@@ -81,31 +81,43 @@ async function scan() {
   for (const r of results) {
     let face = findMatch(r.descriptor, known, +$('threshold').value);
     if (face) face.times.push(t);
-    else { face = addFace(r.descriptor, r.detection.box, t); log(`${fmt(t)}  NEW face #${face.id}`); }
+    else { face = addFace(r.descriptor, r.detection.box, t); log(`${t}  NEW face #${face.id}`); }
     render(face);
   }
   const ms = Math.round(performance.now() - start); // use this to judge if the device keeps up with the scan interval
-  if (results.length) log(`${fmt(t)}  ${results.length} face(s): ${results.map(r => '#' + findMatch(r.descriptor, known, +$('threshold').value).id).join(' ')}  [${ms} ms]`);
+  if (results.length) log(`${t}${results.length} face(s): ${results.map(r => '#' + findMatch(r.descriptor, known, +$('threshold').value).id).join(' ')}  [${ms} ms]`);
 }
 
 let busy = false, lastScan = -Infinity;
 function loop() {
-  const due = Math.abs(video.currentTime - lastScan) >= +$('interval').value;
-  if (!busy && !video.paused && !video.ended && video.readyState >= 2 && due) {
-    busy = true; lastScan = video.currentTime;
+  const now = performance.now() / 1000;
+  if (!busy && !video.paused && video.readyState >= 2 && now - lastScan >= +$('interval').value) {
+    busy = true; lastScan = now;
     scan().catch(e => log('Error: ' + e.message)).finally(() => busy = false);
   }
   requestAnimationFrame(loop);
 }
 
-$('file').onchange = e => {
-  const f = e.target.files[0];
-  if (!f) return;
-  video.src = URL.createObjectURL(f);
-  lastScan = -Infinity;
-  log(`Loaded ${f.name}`);
-  video.play();
-};
+// Needs HTTPS (GitHub Pages is) or localhost
+async function startCamera(deviceId) {
+  try {
+    video.srcObject?.getTracks().forEach(tr => tr.stop());
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: deviceId
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1280 } }
+      : { facingMode: 'environment', width: { ideal: 1280 } } }); // first start: rear camera on phones, webcam on laptops
+    video.play();
+    // camera names are only readable after permission is granted, so list them now
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const sel = $('cameras');
+    sel.replaceChildren(...cams.map((c, i) => new Option(c.label || `Camera ${i + 1}`, c.deviceId)));
+    sel.value = video.srcObject.getVideoTracks()[0].getSettings().deviceId;
+    sel.hidden = cams.length < 2;
+    $('camera').hidden = true;
+    log(`Camera: ${sel.selectedOptions[0]?.text ?? 'started'}`);
+  } catch (e) { log('Camera error: ' + e.message); }
+}
+$('camera').onclick = () => startCamera();
+$('cameras').onchange = e => startCamera(e.target.value);
 
 (async () => {
   await Promise.all([
@@ -117,8 +129,8 @@ $('file').onchange = e => {
   const a = new Float32Array(128), b = new Float32Array(128).fill(0.1);
   console.assert(findMatch(a, [{ id: 1, descriptor: a }], 0.55)?.id === 1, 'identical should match');
   console.assert(findMatch(a, [{ id: 1, descriptor: b }], 0.55) === null, 'distant should not match');
-  $('status').textContent = `Ready (${faceapi.tf.getBackend()} backend): pick a video file. Faces are scanned while it plays.`;
-  $('file').disabled = false;
+  $('status').textContent = `Ready (${faceapi.tf.getBackend()} backend): press Start camera. Faces are scanned continuously.`;
+  $('camera').disabled = false;
   loop();
 })().catch(e => $('status').textContent = 'Model load failed: ' + e.message);
 </script>
