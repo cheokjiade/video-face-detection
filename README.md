@@ -12,6 +12,9 @@ A single static page (`index.html`). It opens the device camera (with a picker i
    - A 68-point landmark model lines each face up.
    - A ResNet model turns each face into a 128-number descriptor.
 3. It compares each descriptor with the faces already found, using Euclidean distance. A distance below the threshold (0.55 by default) means the same person, and the time is added to that person's list. Otherwise it saves a cropped snapshot as a new unique face.
+   - **Starting a new face:** a face only becomes a new card if the detection is at least 80% confident and the crop is sharp enough. Sharpness is the variance of the Laplacian on a 64×64 grey crop; the default minimum is 40. Detector confidence stays at 95–100% even on blurred faces, so confidence alone can't filter out blur. Test values: a sharp photo scores about 2,700–3,900; Gaussian blur of radius 2 about 90; radius 3 or more under 30. The log shows each face's `confidence%/sSharpness` so you can tune the limits.
+   - **One match per frame:** within a single frame, each known face can match only one detection. Blurred faces of different people look alike, and without this rule they would merge into one card.
+   - **Best snapshot:** every card keeps its sharpest sighting. That sighting's image is shown, and its descriptor is used for later matching.
 4. A **Performance** panel updates after every scan. It shows:
    - **OK/SLOW**: whether scans take more than 60% of the scan interval, judged on the average of the last 20 scans (so it catches slowdown from heat).
    - **Worst scan** and total scan count.

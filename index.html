@@ -23,6 +23,8 @@
 <select id="cameras" hidden aria-label="Camera"></select>
 <label>Scan every <input id="interval" type="number" value="0.5" step="0.1" min="0.1" style="width:4rem">s</label>
 <label>Match threshold <input id="threshold" type="number" value="0.55" step="0.05" min="0.1" max="1" style="width:4rem"></label>
+<label>New face min confidence <input id="newMin" type="number" value="0.8" step="0.05" min="0.5" max="1" style="width:4rem"></label>
+<label>New face min sharpness <input id="minSharp" type="number" value="40" step="10" min="0" style="width:4rem"></label>
 <video id="video" muted playsinline></video>
 <h2>Performance</h2>
 <pre id="perf" aria-live="off">Waiting for first scan…</pre>
@@ -51,6 +53,22 @@ function findMatch(descriptor, faces, threshold) {
   return best;
 }
 
+// Blur score: variance of the Laplacian on a fixed-size grey crop (higher = sharper).
+// Detector confidence stays ~97-100% on blurred faces, so it can't be used for this.
+const sharpCanvas = Object.assign(document.createElement('canvas'), { width: 64, height: 64 });
+function sharpness(source, box) {
+  const S = 64, ctx = sharpCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, box.x, box.y, box.width, box.height, 0, 0, S, S);
+  const d = ctx.getImageData(0, 0, S, S).data, g = new Float32Array(S * S);
+  for (let i = 0; i < g.length; i++) g[i] = d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114;
+  let sum = 0, sq = 0, n = 0;
+  for (let y = 1; y < S - 1; y++) for (let x = 1; x < S - 1; x++) {
+    const i = y * S + x, lap = g[i - 1] + g[i + 1] + g[i - S] + g[i + S] - 4 * g[i];
+    sum += lap; sq += lap * lap; n++;
+  }
+  return sq / n - (sum / n) ** 2;
+}
+
 function snapshot(box) {
   const pad = box.width * 0.3, c = document.createElement('canvas');
   const x = Math.max(0, box.x - pad), y = Math.max(0, box.y - pad);
@@ -60,10 +78,10 @@ function snapshot(box) {
   return c.toDataURL('image/jpeg', 0.9); // this is what you'd POST to the API later
 }
 
-function addFace(descriptor, box, t) {
-  const face = { id: known.length + 1, descriptor, times: [t], el: document.createElement('div') };
+function addFace(r, sharp, t) {
+  const face = { id: known.length + 1, descriptor: r.descriptor, sharp, times: [t], el: document.createElement('div') };
   face.el.className = 'face';
-  face.el.innerHTML = `<img src="${snapshot(box)}" alt="Face ${face.id}"><div><b>#${face.id}</b> <span class="t"></span></div>`;
+  face.el.innerHTML = `<img src="${snapshot(r.detection.box)}" alt="Face ${face.id}"><div><b>#${face.id}</b> <span class="t"></span></div>`;
   $('faces').append(face.el);
   known.push(face);
   $('count').textContent = known.length;
@@ -101,15 +119,27 @@ async function scan() {
     .detectAllFaces(frame, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
     .withFaceLandmarks().withFaceDescriptors();
   const t2 = performance.now();
+  const seen = [], claimed = new Set(); // one person can't appear twice in a frame
   for (const r of results) {
-    let face = findMatch(r.descriptor, known, +$('threshold').value);
-    if (face) face.times.push(t);
-    else { face = addFace(r.descriptor, r.detection.box, t); log(`${t}  NEW face #${face.id}`); }
+    const score = r.detection.score, sharp = sharpness(frame, r.detection.box);
+    const tag = `${Math.round(score * 100)}%/s${Math.round(sharp)}`;
+    let face = findMatch(r.descriptor, known.filter(f => !claimed.has(f)), +$('threshold').value);
+    if (face) {
+      face.times.push(t);
+      if (sharp > face.sharp) { // sharper sighting: keep its image, and its descriptor as the matching reference
+        face.sharp = sharp; face.descriptor = r.descriptor;
+        face.el.querySelector('img').src = snapshot(r.detection.box);
+      }
+    } else if (score >= +$('newMin').value && sharp >= +$('minSharp').value) {
+      face = addFace(r, sharp, t); log(`${t}  NEW face #${face.id} (${tag})`);
+    } else { seen.push(`?${tag}`); continue; } // blurry or unsure: don't start a new face from it
+    claimed.add(face);
+    seen.push('#' + face.id);
     render(face);
   }
   const t3 = performance.now(), ms = Math.round(t3 - t0);
   showPerf(t1 - t0, t2 - t1, t3 - t2, results.length);
-  if (results.length) log(`${t}  ${results.length} face(s): ${results.map(r => '#' + findMatch(r.descriptor, known, +$('threshold').value).id).join(' ')}  [${ms} ms]`);
+  if (results.length) log(`${t}  ${results.length} face(s): ${seen.join(' ')}  [${ms} ms]`);
 }
 
 let busy = false, lastScan = -Infinity;
