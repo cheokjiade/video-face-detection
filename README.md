@@ -15,8 +15,12 @@ A single static page (`index.html`). It opens the device camera (with a picker i
    - **How 0.5 was chosen:** each Apollo 11 astronaut in the crew photo was compared with their own separate NASA portrait. Same person scored 0.61, 0.68 and 0.86; different people scored 0.18–0.40. Within one camera session, same-person scores should be higher still.
    - **Starting a new face:** a face only becomes a new card if the detection is at least 80% confident and the crop is sharp enough. Sharpness is the variance of the Laplacian on a 64×64 grey crop; the default minimum is 40. Detector confidence stays at 95–100% even on blurred faces, so confidence alone can't filter out blur. With face-api's tighter crops, a sharp photo scored about 2,700–3,900, Gaussian blur of radius 2 about 90, and radius 3 or more under 30. With Human, the sharp photo scores about 4,700–5,800; at blur radius 2–3 faces are still accepted, and at radius 6 they are rejected (sharpness about 29). The log shows each face's `confidence%/sSharpness` so you can tune the limits.
    - **One match per frame:** within a single frame, each known face can match only one detection. Blurred faces of different people look alike, and without this rule they would merge into one card.
-   - **Best snapshot:** every card keeps its sharpest sighting. That sighting's image is shown, and its descriptor is used for later matching.
-4. A **Performance** panel updates after every scan. It shows:
+   - **Several views per person:** each card keeps up to 20 descriptors from noticeably different views (near and far, head turned). A new sighting matches the card if it is close to *any* of them. With only one descriptor per card, a woman walking toward the camera in the Tokyo test video was split into two cards as her face grew and turned.
+   - **Doubled boxes:** the detector sometimes returns two boxes for one face. Any box whose centre lies inside a higher-scoring box is dropped. Before this rule, a doubled box created a duplicate card in the Tokyo test.
+   - **Best snapshot:** every card shows its sharpest sighting.
+   - **Detection cut-off** ("Detect min confidence", default 0.2): faces scoring below this are ignored entirely. In the crowd tests, 0.2 found about twice as many faces as 0.5, and each scan took about twice as long. A new card still needs at least 0.6 confidence; faces between 0.2 and 0.6 can only match existing cards.
+4. **Boxes over the live video:** after each scan, every face gets a box. Green with `#id` means it matched or created that card. Yellow with `? NN%` means the face was too uncertain or blurry to start a card. The boxes come from the last scan, so at a 0.5 s interval they trail people who are moving. Set the interval to 0 for near-live boxes.
+5. A **Performance** panel updates after every scan. It shows:
    - **OK/SLOW/CONTINUOUS**: whether scans take more than 60% of the scan interval, judged on the average of the last 20 scans (so it catches slowdown from heat). CONTINUOUS means the interval is 0.
    - **Worst scan** and total scan count.
    - **FPS**:
@@ -30,11 +34,46 @@ A single static page (`index.html`). It opens the device camera (with a picker i
      - **GPU memory**.
      - **JavaScript heap**: Chromium browsers only.
    - **System info**: backend, camera resolution, Human version, model load time and GPU warm-up time.
-5. Right after loading, the page runs `human.warmup()` once. The GPU compiles its programs on a model's first run, which took about 15 s in testing with face-api, so this keeps the first camera scan from freezing.
+6. Right after loading, the page runs `human.warmup()` once. The GPU compiles its programs on a model's first run, which took about 15 s in testing with face-api, so this keeps the first camera scan from freezing.
 
 **Backend:** Human picks one automatically. It prefers **WebGPU** where the browser supports it, and falls back to WebGL. To force one for comparison, add a URL parameter: `?backend=webgl` or `?backend=webgpu`.
 
 To run it locally, run `npx serve` and open the localhost URL. The camera needs HTTPS or localhost, so opening the file directly may not work. The models load from the jsDelivr CDN.
+
+## Test results
+
+These tests use public-domain and CC0 images from Wikimedia Commons, fed to Edge as a simulated camera (`--use-file-for-fake-video-capture`) on the desktop test PC. Settings are the defaults unless noted.
+
+| Test | People visible | Faces found / cards | Scan time | Notes |
+|---|---|---|---|---|
+| [Apollo 11 VIP spectators](https://commons.wikimedia.org/wiki/File:Spiro_Agnew_and_Lyndon_Johnson_Watch_the_Apollo_11_Liftoff_-_GPN-2002-000068.jpg) (NASA, public domain) | ~25 | 14 / 13 | ~660 ms (SLOW) | Faces tilted up, sunglasses and hands over eyes. 1 found face was too uncertain for a card |
+| [Metro platform at rush hour](https://commons.wikimedia.org/wiki/File:Evening_rush_on_the_Line_4-Yellow_platform_at_Pinheiros_station,_S%C3%A3o_Paulo.jpg) (CC0) | ~15 clear, many more distant | 4 / 3 | ~280 ms | Small and partly hidden faces are missed |
+| [Pedestrians on a crosswalk](https://commons.wikimedia.org/wiki/File:Pedestrians_crossing_rue_Dalhousie,_Quebec_City_01.jpg) (CC0) | 11 | 9 / 9 | ~430 ms (SLOW) | 2 people seen side-on were missed |
+| [Sora "Tokyo Walk" video](https://commons.wikimedia.org/wiki/File:OpenAI_Sora_in_Action-_Tokyo_Walk.webm) (AI-generated, public domain), interval 0 | 1 main, background crowd | 1 card over 347 scans | ~45–65 ms, ~16 scans/s | One person tracked as one card for 20 s while walking toward the camera |
+| [Distant crowd on a bridge](https://commons.wikimedia.org/wiki/File:Artemis_II_launch_from_A_Max_Brewer_Bridge_(AFRC2026-0071-03).jpg) (NASA, public domain) | hundreds | 0 | ~20 ms | Faces are a few pixels across. Too small to detect |
+
+**What this shows:**
+- **Faces need about 30–40 px or more** in the camera frame. BlazeFace scales every frame down to 256×256, so small and distant faces are lost. Splitting the frame into 2×2 tiles was tested and added only 1–6 faces at 2–4 times the cost, so it isn't enabled.
+- **Faces must point roughly at the camera.** Faces seen side-on, looking up, or covered by hands or sunglasses are often missed.
+- **Scan time grows with the number of faces**, because every face gets alignment and a descriptor. With 9–14 faces the desktop PC can't keep up with a 0.5 s interval, and the panel shows SLOW. For crowds, use a 1 s interval.
+- **Duplicate removal held** in every test after the two fixes above (several views per person, dropping doubled boxes).
+
+### Screenshots
+
+**Apollo 11 VIP spectators:** green boxes are cards; the yellow box was too uncertain to start a card.
+![Apollo 11 VIPs](docs/screenshots/vips.jpg)
+
+**Metro platform:** only the larger faces near the camera are found.
+![Metro platform](docs/screenshots/platform.jpg)
+
+**Pedestrians on a crosswalk:**
+![Pedestrians](docs/screenshots/quebec.jpg)
+
+**Sora Tokyo walk video:** one person, one card, 347 scans.
+![Tokyo walk](docs/screenshots/tokyo-walk.jpg)
+
+**Distant crowd:** faces are too small to detect.
+![Distant crowd](docs/screenshots/artemis.jpg)
 
 ## Hardware requirements
 

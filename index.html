@@ -6,7 +6,9 @@
 <title>Camera Face Capture POC</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 1rem; background: #111; color: #eee; }
-  video { max-width: 100%; max-height: 60vh; background: #000; display: block; margin: .5rem 0; }
+  #stage { position: relative; display: inline-block; margin: .5rem 0; }
+  video { max-width: 100%; max-height: 60vh; background: #000; display: block; }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   label { margin-right: 1rem; }
   #faces { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
   .face { background: #222; padding: .5rem; border-radius: 6px; width: 140px; font-size: .8rem; }
@@ -23,9 +25,13 @@
 <select id="cameras" hidden aria-label="Camera"></select>
 <label>Scan every <input id="interval" type="number" value="0.5" step="0.1" min="0" style="width:4rem">s (0 = as fast as possible)</label>
 <label>Match similarity <input id="threshold" type="number" value="0.5" step="0.05" min="0" max="1" style="width:4rem"></label>
-<label>New face min confidence <input id="newMin" type="number" value="0.8" step="0.05" min="0.2" max="1" style="width:4rem"></label>
+<label>Detect min confidence <input id="detMin" type="number" value="0.2" step="0.05" min="0.05" max="1" style="width:4rem"></label>
+<label>New face min confidence <input id="newMin" type="number" value="0.6" step="0.05" min="0.05" max="1" style="width:4rem"></label>
 <label>New face min sharpness <input id="minSharp" type="number" value="40" step="10" min="0" style="width:4rem"></label>
-<video id="video" muted playsinline></video>
+<div id="stage">
+  <video id="video" muted playsinline></video>
+  <canvas id="overlay" aria-hidden="true"></canvas>
+</div>
 <h2>Performance</h2>
 <pre id="perf" aria-live="off">Waiting for first scan…</pre>
 <h2>Unique faces (<span id="count">0</span>)</h2>
@@ -42,7 +48,7 @@ const human = new Human({
   cacheSensitivity: 0,          // default reuses old results when the frame barely changes: snapshots would lag reality
   filter: { enabled: false },
   face: {
-    detector: { maxDetected: 20, minConfidence: 0.5, rotation: false }, // default maxDetected is 1
+    detector: { maxDetected: 50, minConfidence: 0.2, rotation: false }, // default maxDetected is 1; each face adds alignment + descriptor time
     mesh: { enabled: true },      // needed to align faces for the descriptor
     description: { enabled: true }, // FaceRes: the 1024-value face descriptor used for dedupe
     iris: { enabled: false }, emotion: { enabled: false }, antispoof: { enabled: false }, liveness: { enabled: false },
@@ -60,14 +66,18 @@ const known = []; // { id, descriptor, sharp, times: [], el }
 const log = msg => { $('log').textContent += msg + '\n'; $('log').scrollTop = 1e9; console.log(msg); };
 const toBox = ([x, y, width, height]) => ({ x, y, width, height }); // Human boxes are [x, y, w, h]
 
-// ponytail: linear scan over known faces, fine for hundreds; use a vector index if it grows to thousands
-function findMatch(descriptor, faces, threshold) {
-  let best = null, bestSim = threshold;
-  for (const f of faces) {
-    const s = human.match.similarity(descriptor, f.descriptor); // 0..1, higher = more alike
-    if (s >= bestSim) { best = f; bestSim = s; }
+// Each face keeps several descriptors from different views (near/far, head turned); a sighting
+// matches a face if it is close to ANY of them. One descriptor per face split one walking person
+// into two cards in the Tokyo walk test as her face grew and turned.
+// ponytail: linear scan over faces x samples, fine for hundreds of faces; use a vector index for thousands
+const MAX_SAMPLES = 20, NEW_VIEW_BELOW = 0.8; // add a sample only when the view is noticeably different
+function bestMatch(descriptor, faces) {
+  let face = null, sim = 0;
+  for (const f of faces) for (const d of f.samples) {
+    const s = human.match.similarity(descriptor, d); // 0..1, higher = more alike
+    if (s > sim) { face = f; sim = s; }
   }
-  return best;
+  return { face, sim };
 }
 
 // Blur score: variance of the Laplacian on a fixed-size grey crop (higher = sharper).
@@ -96,7 +106,7 @@ function snapshot(box) {
 }
 
 function addFace(f, box, sharp, t) {
-  const face = { id: known.length + 1, descriptor: f.embedding, sharp, times: [t], el: document.createElement('div') };
+  const face = { id: known.length + 1, samples: [f.embedding], sharp, times: [t], el: document.createElement('div') };
   face.el.className = 'face';
   face.el.innerHTML = `<img src="${snapshot(box)}" alt="Face ${face.id}"><div><b>#${face.id}</b> <span class="t"></span></div>`;
   $('faces').append(face.el);
@@ -135,33 +145,57 @@ function showPerf(copy, model, match, faces) {
   $('perf').className = slow ? 'slow' : '';
 }
 
+// Boxes are drawn at the scanned frame's pixel size; CSS stretches the canvas over the video.
+// They are as old as the last scan, so at a 0.5 s interval they trail moving people.
+function drawBoxes(boxes) {
+  const c = $('overlay'), ctx = c.getContext('2d');
+  c.width = frame.width; c.height = frame.height; // also clears
+  const lw = Math.max(2, frame.width / 320);
+  ctx.lineWidth = lw; ctx.font = `bold ${lw * 7}px system-ui, sans-serif`; ctx.textBaseline = 'bottom';
+  for (const { box, label, ok } of boxes) {
+    ctx.strokeStyle = ctx.fillStyle = ok ? '#3f3' : '#fc3'; // green = matched/new card, yellow = rejected (blurry/unsure)
+    ctx.strokeRect(box.x, box.y, box.width, box.height);
+    const w = ctx.measureText(label).width + lw * 2, h = lw * 8, y = Math.max(h, box.y);
+    ctx.fillRect(box.x - lw / 2, y - h, w, h);
+    ctx.fillStyle = '#000'; ctx.fillText(label, box.x + lw / 2, y - lw / 2);
+  }
+}
+
 async function scan() {
   const t = new Date().toLocaleTimeString(), t0 = performance.now();
   frame.width = video.videoWidth; frame.height = video.videoHeight;
   frame.getContext('2d').drawImage(video, 0, 0); // freeze the frame so the crop matches the detection
   const t1 = performance.now();
+  human.config.face.detector.minConfidence = +$('detMin').value; // 0.2 found ~2x the faces of 0.5 in crowd tests, at ~2x the time
   const res = await human.detect(frame);
   if (res.error) throw new Error(res.error);
   const t2 = performance.now();
-  const faces = res.face.filter(f => f.embedding?.length);
-  const seen = [], claimed = new Set(); // one person can't appear twice in a frame
+  // The detector occasionally returns two boxes for one face (seen in the Tokyo walk test), which made a
+  // duplicate card. Drop any box whose centre lies inside a higher-scoring box.
+  const inside = (f, g) => { const cx = f.box[0] + f.box[2] / 2, cy = f.box[1] + f.box[3] / 2;
+    return cx > g.box[0] && cx < g.box[0] + g.box[2] && cy > g.box[1] && cy < g.box[1] + g.box[3]; };
+  const faces = res.face.filter(f => f.embedding?.length).sort((a, b) => b.score - a.score)
+    .filter((f, i, all) => !all.slice(0, i).some(g => inside(f, g)));
+  const seen = [], boxes = [], claimed = new Set(); // one person can't appear twice in a frame
   for (const f of faces) {
     const box = toBox(f.box), sharp = sharpness(frame, box);
     const tag = `${Math.round(f.score * 100)}%/s${Math.round(sharp)}`;
-    let face = findMatch(f.embedding, known.filter(k => !claimed.has(k)), +$('threshold').value);
+    const m = bestMatch(f.embedding, known.filter(k => !claimed.has(k)));
+    let face = m.sim >= +$('threshold').value ? m.face : null;
     if (face) {
       face.times.push(t);
-      if (sharp > face.sharp) { // sharper sighting: keep its image, and its descriptor as the matching reference
-        face.sharp = sharp; face.descriptor = f.embedding;
-        face.el.querySelector('img').src = snapshot(box);
-      }
+      if (m.sim < NEW_VIEW_BELOW && face.samples.length < MAX_SAMPLES) face.samples.push(f.embedding);
+      if (sharp > face.sharp) { face.sharp = sharp; face.el.querySelector('img').src = snapshot(box); } // keep the sharpest image
     } else if (f.score >= +$('newMin').value && sharp >= +$('minSharp').value) {
-      face = addFace(f, box, sharp, t); log(`${t}  NEW face #${face.id} (${tag})`);
-    } else { seen.push(`?${tag}`); continue; } // blurry or unsure: don't start a new face from it
+      face = addFace(f, box, sharp, t);
+      log(`${t}  NEW face #${face.id} (${tag}${m.face ? `, closest was #${m.face.id} at ${m.sim.toFixed(2)}` : ''})`);
+    } else { seen.push(`?${tag}`); boxes.push({ box, label: `? ${Math.round(f.score * 100)}%`, ok: false }); continue; } // blurry or unsure: don't start a new face from it
     claimed.add(face);
     seen.push('#' + face.id);
+    boxes.push({ box, label: `#${face.id}`, ok: true });
     render(face);
   }
+  drawBoxes(boxes);
   const t3 = performance.now(), ms = Math.round(t3 - t0);
   showPerf(t1 - t0, t2 - t1, t3 - t2, faces.length);
   if (faces.length) log(`${t}  ${faces.length} face(s): ${seen.join(' ')}  [${ms} ms]`);
@@ -210,8 +244,9 @@ try {
   log(perf.loadMs);
   // self-check of the dedupe logic
   const a = Array.from({ length: 1024 }, (_, i) => Math.sin(i)), b = a.map(v => -v);
-  console.assert(findMatch(a, [{ id: 1, descriptor: a }], 0.5)?.id === 1, 'identical should match');
-  console.assert(findMatch(a, [{ id: 1, descriptor: b }], 0.5) === null, 'opposite should not match');
+  const m1 = bestMatch(a, [{ id: 1, samples: [b, a] }]), m2 = bestMatch(a, [{ id: 1, samples: [b] }]);
+  console.assert(m1.face?.id === 1 && m1.sim === 1, 'any identical sample should match');
+  console.assert(m2.sim < 0.5, 'opposite should not match');
   $('status').textContent = `Ready (${human.tf.getBackend()} backend): press Start camera. Faces are scanned continuously.`;
   $('camera').disabled = false;
   loop();
