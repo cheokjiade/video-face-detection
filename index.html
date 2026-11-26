@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Face Capture POC</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1rem; background: #111; color: #eee; }
+  video { max-width: 100%; max-height: 60vh; background: #000; display: block; margin: .5rem 0; }
+  label { margin-right: 1rem; }
+  #faces { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+  .face { background: #222; padding: .5rem; border-radius: 6px; width: 140px; font-size: .8rem; }
+  .face img { width: 140px; height: 140px; object-fit: cover; border-radius: 4px; }
+  #log { background: #000; height: 12rem; overflow: auto; font: .8rem monospace; padding: .5rem; white-space: pre; }
+</style>
+</head>
+<body>
+<h1>Video Face Capture POC</h1>
+<p id="status">Loading models…</p>
+<input type="file" id="file" accept="video/*" disabled>
+<label>Scan every <input id="interval" type="number" value="0.5" step="0.1" min="0.1" style="width:4rem">s</label>
+<label>Match threshold <input id="threshold" type="number" value="0.55" step="0.05" min="0.1" max="1" style="width:4rem"></label>
+<video id="video" controls muted playsinline></video>
+<h2>Unique faces (<span id="count">0</span>)</h2>
+<div id="faces"></div>
+<h2>Log</h2>
+<div id="log"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/dist/face-api.js"></script>
+<script>
+const MODELS = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.15/model/';
+const $ = id => document.getElementById(id);
+const video = $('video'), frame = document.createElement('canvas');
+const known = []; // { id, descriptor, times: [], el }
+
+const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+const log = msg => { $('log').textContent += msg + '\n'; $('log').scrollTop = 1e9; console.log(msg); };
+
+// ponytail: linear scan over known faces, fine for hundreds; use a vector index if it grows to thousands
+function findMatch(descriptor, faces, threshold) {
+  let best = null, bestDist = threshold;
+  for (const f of faces) {
+    const d = faceapi.euclideanDistance(descriptor, f.descriptor);
+    if (d < bestDist) { best = f; bestDist = d; }
+  }
+  return best;
+}
+
+function snapshot(box) {
+  const pad = box.width * 0.3, c = document.createElement('canvas');
+  const x = Math.max(0, box.x - pad), y = Math.max(0, box.y - pad);
+  const w = Math.min(frame.width - x, box.width + pad * 2), h = Math.min(frame.height - y, box.height + pad * 2);
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(frame, x, y, w, h, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.9); // this is what you'd POST to the API later
+}
+
+function addFace(descriptor, box, t) {
+  const face = { id: known.length + 1, descriptor, times: [t], el: document.createElement('div') };
+  face.el.className = 'face';
+  face.el.innerHTML = `<img src="${snapshot(box)}" alt="Face ${face.id}"><div><b>#${face.id}</b> <span class="t"></span></div>`;
+  $('faces').append(face.el);
+  known.push(face);
+  $('count').textContent = known.length;
+  return face;
+}
+
+function render(face) {
+  const t = face.times;
+  face.el.querySelector('.t').textContent = `${fmt(t[0])}–${fmt(t[t.length - 1])} · ${t.length} seen`;
+  face.el.title = t.map(fmt).join(', ');
+}
+
+async function scan() {
+  const t = video.currentTime, start = performance.now();
+  frame.width = video.videoWidth; frame.height = video.videoHeight;
+  frame.getContext('2d').drawImage(video, 0, 0); // freeze the frame so the crop matches the detection
+  const results = await faceapi
+    .detectAllFaces(frame, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
+    .withFaceLandmarks().withFaceDescriptors();
+  for (const r of results) {
+    let face = findMatch(r.descriptor, known, +$('threshold').value);
+    if (face) face.times.push(t);
+    else { face = addFace(r.descriptor, r.detection.box, t); log(`${fmt(t)}  NEW face #${face.id}`); }
+    render(face);
+  }
+  const ms = Math.round(performance.now() - start); // use this to judge if the device keeps up with the scan interval
+  if (results.length) log(`${fmt(t)}  ${results.length} face(s): ${results.map(r => '#' + findMatch(r.descriptor, known, +$('threshold').value).id).join(' ')}  [${ms} ms]`);
+}
+
+let busy = false, lastScan = -Infinity;
+function loop() {
+  const due = Math.abs(video.currentTime - lastScan) >= +$('interval').value;
+  if (!busy && !video.paused && !video.ended && video.readyState >= 2 && due) {
+    busy = true; lastScan = video.currentTime;
+    scan().catch(e => log('Error: ' + e.message)).finally(() => busy = false);
+  }
+  requestAnimationFrame(loop);
+}
+
+$('file').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  video.src = URL.createObjectURL(f);
+  lastScan = -Infinity;
+  log(`Loaded ${f.name}`);
+  video.play();
+};
+
+(async () => {
+  await Promise.all([
+    faceapi.nets.ssdMobilenetv1.loadFromUri(MODELS),
+    faceapi.nets.faceLandmark68Net.loadFromUri(MODELS),
+    faceapi.nets.faceRecognitionNet.loadFromUri(MODELS),
+  ]);
+  // self-check of the dedupe logic
+  const a = new Float32Array(128), b = new Float32Array(128).fill(0.1);
+  console.assert(findMatch(a, [{ id: 1, descriptor: a }], 0.55)?.id === 1, 'identical should match');
+  console.assert(findMatch(a, [{ id: 1, descriptor: b }], 0.55) === null, 'distant should not match');
+  $('status').textContent = `Ready (${faceapi.tf.getBackend()} backend): pick a video file. Faces are scanned while it plays.`;
+  $('file').disabled = false;
+  loop();
+})().catch(e => $('status').textContent = 'Model load failed: ' + e.message);
+</script>
+</body>
+</html>
