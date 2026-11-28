@@ -24,10 +24,11 @@
 <button id="camera" disabled>Start camera</button>
 <select id="cameras" hidden aria-label="Camera"></select>
 <label>Scan every <input id="interval" type="number" value="0.5" step="0.1" min="0" style="width:4rem">s (0 = as fast as possible)</label>
-<label>Match similarity <input id="threshold" type="number" value="0.5" step="0.05" min="0" max="1" style="width:4rem"></label>
+<label>Re-find similarity <input id="threshold" type="number" value="0.8" step="0.05" min="0" max="1" style="width:4rem"></label>
 <label>Detect min confidence <input id="detMin" type="number" value="0.2" step="0.05" min="0.05" max="1" style="width:4rem"></label>
 <label>New face min confidence <input id="newMin" type="number" value="0.6" step="0.05" min="0.05" max="1" style="width:4rem"></label>
 <label>New face min sharpness <input id="minSharp" type="number" value="40" step="10" min="0" style="width:4rem"></label>
+<label>Forget after (min) <input id="forget" type="number" value="5" step="1" min="0" style="width:4rem"> (0 = never)</label>
 <div id="stage">
   <video id="video" muted playsinline></video>
   <canvas id="overlay" aria-hidden="true"></canvas>
@@ -61,9 +62,15 @@ window.human = human; // handy for poking at it from the browser console
 const $ = id => document.getElementById(id);
 const video = $('video'), frame = document.createElement('canvas');
 frame.getContext('2d', { willReadFrequently: true }); // pixels are read back every scan
-const known = []; // { id, descriptor, sharp, times: [], el }
+const known = []; // cards still being matched: { id, samples: [], sharp, first, last, count, el }
+let total = 0;    // unique faces ever, including forgotten ones
 
-const log = msg => { $('log').textContent += msg + '\n'; $('log').scrollTop = 1e9; console.log(msg); };
+const MAX_LOG = 500, MAX_CARDS = 200; // keep long runs from growing the page forever
+const log = msg => {
+  const el = $('log'); el.append(msg + '\n');
+  while (el.childNodes.length > MAX_LOG) el.firstChild.remove();
+  el.scrollTop = 1e9; console.log(msg);
+};
 const toBox = ([x, y, width, height]) => ({ x, y, width, height }); // Human boxes are [x, y, w, h]
 
 // Each face keeps several descriptors from different views (near/far, head turned); a sighting
@@ -71,13 +78,40 @@ const toBox = ([x, y, width, height]) => ({ x, y, width, height }); // Human box
 // into two cards in the Tokyo walk test as her face grew and turned.
 // ponytail: linear scan over faces x samples, fine for hundreds of faces; use a vector index for thousands
 const MAX_SAMPLES = 20, NEW_VIEW_BELOW = 0.8; // add a sample only when the view is noticeably different
+// Samples are only added from trusted sightings (tracked, or a strict re-find), so keepsView no longer
+// needs a confidence margin. Adding samples from borderline matches let one card absorb several
+// look-alike (masked) people in a crowd test: each wrong match made the next one easier.
+const keepsView = (sim, n) => sim < NEW_VIEW_BELOW && n < MAX_SAMPLES;
+// Best card and the runner-up card's similarity, so a re-find can demand a clear winner.
 function bestMatch(descriptor, faces) {
-  let face = null, sim = 0;
-  for (const f of faces) for (const d of f.samples) {
-    const s = human.match.similarity(descriptor, d); // 0..1, higher = more alike
-    if (s > sim) { face = f; sim = s; }
+  let face = null, sim = 0, second = 0;
+  for (const f of faces) {
+    let s = 0;
+    for (const d of f.samples) s = Math.max(s, human.match.similarity(descriptor, d)); // 0..1, higher = more alike
+    if (s > sim) { second = sim; face = f; sim = s; } else if (s > second) second = s;
   }
-  return { face, sim };
+  return { face, sim, second };
+}
+
+// Tracking: in a masked crowd FaceRes rated different people 0.63 alike (median), so the descriptor
+// can't tell neighbours apart. Box position can: a face is paired with the card seen moments ago whose
+// box centre is closest, within MAX_SHIFT box widths. Centre distance rather than IoU: in a crowd walking
+// toward the camera, faces moved a median 0.46 widths between scans (~0.6 s apart), so half the true
+// pairs had IoU under 0.3; the nearest other face was a median 1.2 widths away.
+// Greedy, closest first, one card per detection. TRACK_MS 2.5 s: in the Tokyo walk the face went undetected
+// for up to 2 s at a time (several scans), and each gap past the window made a new card.
+const TRACK_MS = 2500, MAX_SHIFT = 0.8;
+// Re-find (faces tracking couldn't place) must beat the runner-up card by REFIND_MARGIN, unless it is
+// near-identical: once a person had two cards, both scored high and the margin alone blocked every
+// re-find, so each return made yet another card (most new cards in a looping crowd test).
+const REFIND_MARGIN = 0.05, SAME_SIM = 0.95;
+const shift = (a, b) => // boxes are [x, y, w, h]; centre distance in widths of the larger box
+  Math.hypot(a[0] + a[2] / 2 - b[0] - b[2] / 2, a[1] + a[3] / 2 - b[1] - b[3] / 2) / Math.max(a[2], b[2]);
+function track(boxes, cards) { // -> Map(detection index -> card)
+  const pairs = [], out = new Map(), used = new Set();
+  boxes.forEach((b, i) => cards.forEach(c => { const d = shift(b, c.box); if (d <= MAX_SHIFT) pairs.push([d, i, c]); }));
+  for (const [, i, c] of pairs.sort((p, q) => p[0] - q[0])) if (!out.has(i) && !used.has(c)) { out.set(i, c); used.add(c); }
+  return out;
 }
 
 // Blur score: variance of the Laplacian on a fixed-size grey crop (higher = sharper).
@@ -105,20 +139,20 @@ function snapshot(box) {
   return c.toDataURL('image/jpeg', 0.9); // this is what you'd POST to the API later
 }
 
-function addFace(f, box, sharp, t) {
-  const face = { id: known.length + 1, samples: [f.embedding], sharp, times: [t], el: document.createElement('div') };
+function addFace(f, box, sharp, now) {
+  const face = { id: ++total, samples: [f.embedding], box: f.box, sharp, first: now, last: now, count: 1, el: document.createElement('div') };
   face.el.className = 'face';
   face.el.innerHTML = `<img src="${snapshot(box)}" alt="Face ${face.id}"><div><b>#${face.id}</b> <span class="t"></span></div>`;
   $('faces').append(face.el);
+  while ($('faces').children.length > MAX_CARDS) $('faces').firstElementChild.remove();
   known.push(face);
-  $('count').textContent = known.length;
+  $('count').textContent = total;
   return face;
 }
 
 function render(face) {
-  const t = face.times;
-  face.el.querySelector('.t').textContent = `${t[0]}–${t[t.length - 1]} · ${t.length} seen`;
-  face.el.title = t.join(', ');
+  const time = ms => new Date(ms).toLocaleTimeString();
+  face.el.querySelector('.t').textContent = `${time(face.first)}–${time(face.last)} · ${face.count} seen`;
 }
 
 // ---- performance: scan timing, FPS, memory ----
@@ -162,7 +196,9 @@ function drawBoxes(boxes) {
 }
 
 async function scan() {
-  const t = new Date().toLocaleTimeString(), t0 = performance.now();
+  const now = Date.now(), t = new Date(now).toLocaleTimeString(), t0 = performance.now();
+  const forget = +$('forget').value * 60000; // drop cards not seen for a while: keeps matching fast, frees their samples
+  if (forget) for (let i = known.length; i--;) if (now - known[i].last > forget) known.splice(i, 1);
   frame.width = video.videoWidth; frame.height = video.videoHeight;
   frame.getContext('2d').drawImage(video, 0, 0); // freeze the frame so the crop matches the detection
   const t1 = performance.now();
@@ -176,22 +212,28 @@ async function scan() {
     return cx > g.box[0] && cx < g.box[0] + g.box[2] && cy > g.box[1] && cy < g.box[1] + g.box[3]; };
   const faces = res.face.filter(f => f.embedding?.length).sort((a, b) => b.score - a.score)
     .filter((f, i, all) => !all.slice(0, i).some(g => inside(f, g)));
-  const seen = [], boxes = [], claimed = new Set(); // one person can't appear twice in a frame
-  for (const f of faces) {
+  // Track first (box position vs recently seen cards), then re-find the rest by descriptor, strictly.
+  const tracked = track(faces.map(f => f.box), known.filter(k => now - k.last <= TRACK_MS));
+  const seen = [], boxes = [], claimed = new Set(tracked.values()); // one person can't appear twice in a frame
+  for (const [i, f] of faces.entries()) {
     const box = toBox(f.box), sharp = sharpness(frame, box);
     const tag = `${Math.round(f.score * 100)}%/s${Math.round(sharp)}`;
-    const m = bestMatch(f.embedding, known.filter(k => !claimed.has(k)));
-    let face = m.sim >= +$('threshold').value ? m.face : null;
+    let face = tracked.get(i), m, refound = '';
+    if (face) m = bestMatch(f.embedding, [face]); // only to see whether this is a new view
+    else {
+      m = bestMatch(f.embedding, known.filter(k => !claimed.has(k)));
+      if (m.sim >= +$('threshold').value && (m.sim - m.second >= REFIND_MARGIN || m.sim >= SAME_SIM)) { face = m.face; refound = '~' + m.sim.toFixed(2); }
+    }
     if (face) {
-      face.times.push(t);
-      if (m.sim < NEW_VIEW_BELOW && face.samples.length < MAX_SAMPLES) face.samples.push(f.embedding);
+      face.last = now; face.count++; face.box = f.box;
+      if (keepsView(m.sim, face.samples.length)) face.samples.push(f.embedding);
       if (sharp > face.sharp) { face.sharp = sharp; face.el.querySelector('img').src = snapshot(box); } // keep the sharpest image
     } else if (f.score >= +$('newMin').value && sharp >= +$('minSharp').value) {
-      face = addFace(f, box, sharp, t);
+      face = addFace(f, box, sharp, now);
       log(`${t}  NEW face #${face.id} (${tag}${m.face ? `, closest was #${m.face.id} at ${m.sim.toFixed(2)}` : ''})`);
     } else { seen.push(`?${tag}`); boxes.push({ box, label: `? ${Math.round(f.score * 100)}%`, ok: false }); continue; } // blurry or unsure: don't start a new face from it
     claimed.add(face);
-    seen.push('#' + face.id);
+    seen.push('#' + face.id + refound); // ~0.85 = re-found by descriptor, not tracked
     boxes.push({ box, label: `#${face.id}`, ok: true });
     render(face);
   }
@@ -247,6 +289,10 @@ try {
   const m1 = bestMatch(a, [{ id: 1, samples: [b, a] }]), m2 = bestMatch(a, [{ id: 1, samples: [b] }]);
   console.assert(m1.face?.id === 1 && m1.sim === 1, 'any identical sample should match');
   console.assert(m2.sim < 0.5, 'opposite should not match');
+  console.assert(m2.second === 0 && bestMatch(a, [{ samples: [a] }, { samples: [a] }]).second === 1, 'runner-up card is reported');
+  console.assert(keepsView(0.6, 1) && !keepsView(0.9, 1) && !keepsView(0.6, MAX_SAMPLES), 'only new views add a sample');
+  const tr = track([[0, 0, 10, 10], [100, 0, 10, 10]], [{ id: 1, box: [102, 1, 10, 10] }, { id: 2, box: [1, 1, 11, 11] }]);
+  console.assert(tr.get(0)?.id === 2 && tr.get(1)?.id === 1 && !track([[0, 0, 10, 10]], [{ box: [9, 0, 10, 10] }]).size, 'tracking pairs nearby boxes');
   $('status').textContent = `Ready (${human.tf.getBackend()} backend): press Start camera. Faces are scanned continuously.`;
   $('camera').disabled = false;
   loop();
